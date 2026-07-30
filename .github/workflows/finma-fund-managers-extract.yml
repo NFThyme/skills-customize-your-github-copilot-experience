@@ -1,0 +1,112 @@
+name: Temporary FINMA fund-manager extraction
+
+on:
+  push:
+    branches:
+      - funding-esma-extract-20260730
+    paths:
+      - .github/workflows/finma-fund-managers-extract.yml
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: funding-esma-extract-20260730
+      - name: Download and parse FINMA workbook
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://www.finma.ch/en/~/media/finma/dokumente/bewilligungstraeger/xlsx/flvervt.xlsx?hash=40A1EE24A0C5879846312FA53875BEC1&sc_lang=en'
+          curl --fail --retry 4 --retry-delay 3 --location "$URL" -o finma_fund_managers.xlsx
+          python - <<'PY'
+          import csv, json, re, zipfile
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          path = Path('finma_fund_managers.xlsx')
+          NS = {'m':'http://schemas.openxmlformats.org/spreadsheetml/2006/main','r':'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
+          def col_num(s):
+              n=0
+              for c in s: n=n*26+ord(c)-64
+              return n
+          with zipfile.ZipFile(path) as z:
+              shared=[]
+              if 'xl/sharedStrings.xml' in z.namelist():
+                  root=ET.fromstring(z.read('xl/sharedStrings.xml'))
+                  for si in root.findall('m:si',NS):
+                      shared.append(''.join(t.text or '' for t in si.iter('{%s}t'%NS['m'])))
+              wb=ET.fromstring(z.read('xl/workbook.xml'))
+              rels=ET.fromstring(z.read('xl/_rels/workbook.xml.rels'))
+              relmap={x.attrib['Id']:x.attrib['Target'] for x in rels}
+              sheet=wb.find('m:sheets',NS)[0]
+              target=relmap[sheet.attrib['{%s}id'%NS['r']]].lstrip('/')
+              if not target.startswith('xl/'): target='xl/'+target
+              root=ET.fromstring(z.read(target))
+              rows=[]
+              for row in root.findall('.//m:sheetData/m:row',NS):
+                  vals={}
+                  for c in row.findall('m:c',NS):
+                      ref=c.attrib.get('r','')
+                      m=re.match(r'([A-Z]+)(\d+)',ref)
+                      if not m: continue
+                      ci=col_num(m.group(1))
+                      typ=c.attrib.get('t')
+                      v=c.find('m:v',NS)
+                      inline=c.find('m:is',NS)
+                      val=''
+                      if inline is not None:
+                          val=''.join(t.text or '' for t in inline.iter('{%s}t'%NS['m']))
+                      elif v is not None:
+                          raw=v.text or ''
+                          val=shared[int(raw)] if typ=='s' and raw.isdigit() else raw
+                      vals[ci]=val
+                  if vals:
+                      arr=['']*max(vals)
+                      for ci,val in vals.items(): arr[ci-1]=val
+                      rows.append(arr)
+          # Identify header row and normalise columns.
+          header_i=next(i for i,r in enumerate(rows) if any('Name'==str(x).strip() for x in r) and any('City'==str(x).strip() for x in r))
+          header=rows[header_i]
+          records=[]
+          for r in rows[header_i+1:]:
+              r=(r+['']*len(header))[:len(header)]
+              name=str(r[0]).strip()
+              if not name or name.startswith('Total authorised') or re.match(r'^\d{2}\.\d{2}\.\d{4}',name): continue
+              city=str(r[1]).strip() if len(r)>1 else ''
+              # Remaining three columns contain X flags.
+              flags=[str(x).strip().upper()=='X' for x in r[2:5]]
+              records.append({'name':name,'city':city,'fund_management_company':flags[0] if len(flags)>0 else False,'representative':flags[1] if len(flags)>1 else False,'manager_of_collective_assets':flags[2] if len(flags)>2 else False})
+          if len(records)!=424:
+              raise SystemExit(f'Expected 424 FINMA records, received {len(records)}')
+          package={'source_total':len(records),'updated':'2026-07-30','records':records}
+          Path('finma_fund_managers.json').write_text(json.dumps(package,ensure_ascii=False,indent=2),encoding='utf-8')
+          with Path('finma_fund_managers.csv').open('w',encoding='utf-8',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=list(records[0]));w.writeheader();w.writerows(records)
+          Path('finma_fund_managers_summary.txt').write_text(f'source_total={len(records)}\n',encoding='utf-8')
+          print({'source_total':len(records)})
+          PY
+      - name: Upload validated extract
+        uses: actions/upload-artifact@v4
+        with:
+          name: finma-fund-managers-20260730
+          path: |
+            finma_fund_managers.json
+            finma_fund_managers.csv
+            finma_fund_managers_summary.txt
+          if-no-files-found: error
+          retention-days: 1
+      - name: Commit run locator and extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$GITHUB_RUN_ID" > finma_fund_managers_run_id.txt
+          git config user.name 'Agent Smith Funding Research'
+          git config user.email 'actions@users.noreply.github.com'
+          git add finma_fund_managers.json finma_fund_managers.csv finma_fund_managers_summary.txt finma_fund_managers_run_id.txt
+          git commit -m 'Add validated FINMA fund-manager extract'
+          git push origin HEAD:funding-esma-extract-20260730
