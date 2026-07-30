@@ -1,0 +1,3 @@
+source_total=3778
+active_count=3130
+compressed_lines=58
