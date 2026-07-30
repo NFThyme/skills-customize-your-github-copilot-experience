@@ -27,7 +27,7 @@ jobs:
             curl --fail --retry 4 --retry-delay 3 --location "${BASE}&start=${START}" -o "tmp_esma/page_${START}.json"
           done
           python - <<'PY'
-          import csv, json
+          import base64, csv, json, textwrap, zlib
           from pathlib import Path
 
           docs = []
@@ -57,16 +57,24 @@ jobs:
           ]
           cleaned = [{k: d.get(k, '') for k in fields} for d in active]
           cleaned.sort(key=lambda x: (str(x['ae_homeMemberState']), str(x['ae_entityName']).casefold(), str(x['id'])))
+          package = {'source_total': num_found, 'active_count': len(cleaned), 'records': cleaned}
 
           Path('esma_aifm_active.json').write_text(
-              json.dumps({'source_total': num_found, 'active_count': len(cleaned), 'records': cleaned}, ensure_ascii=False, indent=2),
-              encoding='utf-8'
+              json.dumps(package, ensure_ascii=False, indent=2), encoding='utf-8'
           )
           with Path('esma_aifm_active.csv').open('w', encoding='utf-8', newline='') as f:
               w = csv.DictWriter(f, fieldnames=fields)
               w.writeheader()
               w.writerows(cleaned)
-          print({'source_total': num_found, 'active_count': len(cleaned)})
+
+          raw = json.dumps(package, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+          encoded = base64.b85encode(zlib.compress(raw, level=9)).decode('ascii')
+          Path('esma_aifm_active.b85').write_text('\n'.join(textwrap.wrap(encoded, 4000)) + '\n', encoding='ascii')
+          Path('esma_aifm_summary.txt').write_text(
+              f'source_total={num_found}\nactive_count={len(cleaned)}\ncompressed_lines={len(textwrap.wrap(encoded, 4000))}\n',
+              encoding='utf-8'
+          )
+          print({'source_total': num_found, 'active_count': len(cleaned), 'compressed_lines': len(textwrap.wrap(encoded, 4000))})
           PY
       - name: Commit extracted official records
         shell: bash
@@ -74,6 +82,6 @@ jobs:
           set -euo pipefail
           git config user.name 'Agent Smith Funding Research'
           git config user.email 'actions@users.noreply.github.com'
-          git add esma_aifm_active.json esma_aifm_active.csv
-          git commit -m 'Add validated active ESMA AIFM register extract'
+          git add esma_aifm_active.json esma_aifm_active.csv esma_aifm_active.b85 esma_aifm_summary.txt
+          git commit -m 'Refresh validated active ESMA AIFM register extract'
           git push origin HEAD:funding-esma-extract-20260730
