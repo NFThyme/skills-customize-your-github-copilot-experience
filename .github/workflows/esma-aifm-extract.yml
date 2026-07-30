@@ -61,36 +61,28 @@ jobs:
           raw = json.dumps(package, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
           encoded = base64.b85encode(zlib.compress(raw, level=9)).decode('ascii')
           Path('esma_aifm_active.b85').write_text('\n'.join(textwrap.wrap(encoded, 4000)) + '\n', encoding='ascii')
-
-          compact_fields = ['id','ae_entityName','ae_homeMemberState','ae_competentAuthority','ae_lastUpdateStr','ae_authorisationNotificationDateStr','ae_lei','no_of_funds','ae_website']
-          authority_values = sorted({str(d.get('ae_competentAuthority', '')) for d in active})
-          authority_index = {v: i for i, v in enumerate(authority_values)}
-          country_values = sorted({str(d.get('ae_homeMemberState', '')) for d in active})
-          country_index = {v: i for i, v in enumerate(country_values)}
-          compact_records = []
-          for d in active:
-              compact_records.append([
-                  d.get('id',''), d.get('ae_entityName',''), country_index[str(d.get('ae_homeMemberState',''))],
-                  authority_index[str(d.get('ae_competentAuthority',''))], d.get('ae_lastUpdateStr',''),
-                  d.get('ae_authorisationNotificationDateStr',''), d.get('ae_lei',''), d.get('no_of_funds',''), d.get('ae_website','')
-              ])
-          compact = {'t': num_found, 'a': len(active), 'c': country_values, 'u': authority_values, 'f': compact_fields, 'r': compact_records}
-          compact_raw = json.dumps(compact, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-          compact_encoded = base64.b85encode(zlib.compress(compact_raw, level=9)).decode('ascii')
-          compact_lines = textwrap.wrap(compact_encoded, 6000)
-          Path('esma_aifm_compact.b85').write_text('\n'.join(compact_lines) + '\n', encoding='ascii')
           Path('esma_aifm_summary.txt').write_text(
-              f'source_total={num_found}\nactive_count={len(cleaned)}\ncompressed_lines={len(textwrap.wrap(encoded, 4000))}\ncompact_lines={len(compact_lines)}\n',
-              encoding='utf-8'
+              f'source_total={num_found}\nactive_count={len(cleaned)}\n', encoding='utf-8'
           )
-          print({'source_total': num_found, 'active_count': len(cleaned), 'compact_lines': len(compact_lines)})
+          print({'source_total': num_found, 'active_count': len(cleaned)})
           PY
-      - name: Commit extracted official records
+      - name: Upload validated extract
+        uses: actions/upload-artifact@v4
+        with:
+          name: esma-aifm-active-20260730
+          path: |
+            esma_aifm_active.json
+            esma_aifm_active.csv
+            esma_aifm_summary.txt
+          if-no-files-found: error
+          retention-days: 1
+      - name: Commit run locator and extracted records
         shell: bash
         run: |
           set -euo pipefail
+          printf '%s\n' "$GITHUB_RUN_ID" > esma_aifm_run_id.txt
           git config user.name 'Agent Smith Funding Research'
           git config user.email 'actions@users.noreply.github.com'
-          git add esma_aifm_active.json esma_aifm_active.csv esma_aifm_active.b85 esma_aifm_compact.b85 esma_aifm_summary.txt
+          git add esma_aifm_active.json esma_aifm_active.csv esma_aifm_active.b85 esma_aifm_summary.txt esma_aifm_run_id.txt
           git commit -m 'Refresh validated active ESMA AIFM register extract'
           git push origin HEAD:funding-esma-extract-20260730
