@@ -1,0 +1,79 @@
+name: Temporary ESMA AIFM extraction
+
+on:
+  push:
+    branches:
+      - funding-esma-extract-20260730
+    paths:
+      - .github/workflows/esma-aifm-extract.yml
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: funding-esma-extract-20260730
+      - name: Download and validate ESMA AIFM register
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tmp_esma
+          BASE='https://registers.esma.europa.eu/solr/esma_registers_upreg/select?q=%7B%21join+from%3Did+to%3D_root_%7Dae_entityTypeCode%3AAIF&fq=%28type_s%3Aparent%29%28entity_type%3AaeActivity%29%28entity_type%3AaeActivityHistory%29%28entity_type%3AaeAif%29&rows=1000&wt=json&indent=false'
+          for START in 0 1000 2000 3000; do
+            curl --fail --retry 4 --retry-delay 3 --location "${BASE}&start=${START}" -o "tmp_esma/page_${START}.json"
+          done
+          python - <<'PY'
+          import csv, json
+          from pathlib import Path
+
+          docs = []
+          num_found = None
+          for start in (0, 1000, 2000, 3000):
+              p = Path(f'tmp_esma/page_{start}.json')
+              payload = json.loads(p.read_text(encoding='utf-8'))
+              if num_found is None:
+                  num_found = payload['response']['numFound']
+              docs.extend(payload['response']['docs'])
+
+          if num_found != 3778:
+              raise SystemExit(f'Unexpected ESMA numFound: {num_found}')
+          if len(docs) != num_found:
+              raise SystemExit(f'Expected {num_found} records, received {len(docs)}')
+
+          active = [d for d in docs if str(d.get('ae_status', '')).strip().casefold() == 'active']
+          by_id = {d['id']: d for d in active}
+          if len(by_id) != len(active):
+              raise SystemExit('Duplicate ESMA record IDs detected')
+
+          fields = [
+              'id','ae_entityName','ae_commercialName','ae_status','ae_homeMemberState',
+              'ae_competentAuthority','ae_lastUpdateStr','ae_authorisationNotificationDateStr',
+              'ae_authorisationWithdrawalEndDateStr','ae_lei','ae_headOfficeAddress','ae_website',
+              'no_of_funds'
+          ]
+          cleaned = [{k: d.get(k, '') for k in fields} for d in active]
+          cleaned.sort(key=lambda x: (str(x['ae_homeMemberState']), str(x['ae_entityName']).casefold(), str(x['id'])))
+
+          Path('esma_aifm_active.json').write_text(
+              json.dumps({'source_total': num_found, 'active_count': len(cleaned), 'records': cleaned}, ensure_ascii=False, indent=2),
+              encoding='utf-8'
+          )
+          with Path('esma_aifm_active.csv').open('w', encoding='utf-8', newline='') as f:
+              w = csv.DictWriter(f, fieldnames=fields)
+              w.writeheader()
+              w.writerows(cleaned)
+          print({'source_total': num_found, 'active_count': len(cleaned)})
+          PY
+      - name: Commit extracted official records
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Agent Smith Funding Research'
+          git config user.email 'actions@users.noreply.github.com'
+          git add esma_aifm_active.json esma_aifm_active.csv
+          git commit -m 'Add validated active ESMA AIFM register extract'
+          git push origin HEAD:funding-esma-extract-20260730
