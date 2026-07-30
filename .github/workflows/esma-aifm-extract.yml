@@ -1,4 +1,4 @@
-name: Temporary ESMA AIFM extraction
+name: Temporary official funding-register extraction
 
 on:
   push:
@@ -27,62 +27,49 @@ jobs:
             curl --fail --retry 4 --retry-delay 3 --location "${BASE}&start=${START}" -o "tmp_esma/page_${START}.json"
           done
           python - <<'PY'
-          import base64, csv, json, textwrap, zlib
+          import csv, json
           from pathlib import Path
-
-          docs = []
-          num_found = None
-          for start in (0, 1000, 2000, 3000):
-              payload = json.loads(Path(f'tmp_esma/page_{start}.json').read_text(encoding='utf-8'))
-              if num_found is None:
-                  num_found = payload['response']['numFound']
+          docs=[]; num_found=None
+          for start in (0,1000,2000,3000):
+              payload=json.loads(Path(f'tmp_esma/page_{start}.json').read_text(encoding='utf-8'))
+              if num_found is None: num_found=payload['response']['numFound']
               docs.extend(payload['response']['docs'])
-          if num_found != 3778 or len(docs) != num_found:
-              raise SystemExit(f'Unexpected ESMA totals: numFound={num_found}, docs={len(docs)}')
-
-          active = [d for d in docs if str(d.get('ae_status', '')).strip().casefold() == 'active']
-          if len({d['id'] for d in active}) != len(active):
-              raise SystemExit('Duplicate ESMA record IDs detected')
-
-          fields = [
-              'id','ae_entityName','ae_commercialName','ae_status','ae_homeMemberState',
-              'ae_competentAuthority','ae_lastUpdateStr','ae_authorisationNotificationDateStr',
-              'ae_authorisationWithdrawalEndDateStr','ae_lei','ae_headOfficeAddress','ae_website',
-              'no_of_funds'
-          ]
-          cleaned = [{k: d.get(k, '') for k in fields} for d in active]
-          cleaned.sort(key=lambda x: (str(x['ae_homeMemberState']), str(x['ae_entityName']).casefold(), str(x['id'])))
-          package = {'source_total': num_found, 'active_count': len(cleaned), 'records': cleaned}
-
-          Path('esma_aifm_active.json').write_text(json.dumps(package, ensure_ascii=False, indent=2), encoding='utf-8')
-          with Path('esma_aifm_active.csv').open('w', encoding='utf-8', newline='') as f:
-              w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(cleaned)
-
-          raw = json.dumps(package, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-          encoded = base64.b85encode(zlib.compress(raw, level=9)).decode('ascii')
-          Path('esma_aifm_active.b85').write_text('\n'.join(textwrap.wrap(encoded, 4000)) + '\n', encoding='ascii')
-          Path('esma_aifm_summary.txt').write_text(
-              f'source_total={num_found}\nactive_count={len(cleaned)}\n', encoding='utf-8'
-          )
-          print({'source_total': num_found, 'active_count': len(cleaned)})
+          if num_found!=3778 or len(docs)!=3778: raise SystemExit(f'Unexpected ESMA totals: {num_found}/{len(docs)}')
+          active=[d for d in docs if str(d.get('ae_status','')).strip().casefold()=='active']
+          if len({d['id'] for d in active})!=len(active): raise SystemExit('Duplicate ESMA IDs')
+          fields=['id','ae_entityName','ae_commercialName','ae_status','ae_homeMemberState','ae_competentAuthority','ae_lastUpdateStr','ae_authorisationNotificationDateStr','ae_authorisationWithdrawalEndDateStr','ae_lei','ae_headOfficeAddress','ae_website','no_of_funds']
+          cleaned=[{k:d.get(k,'') for k in fields} for d in active]
+          cleaned.sort(key=lambda x:(str(x['ae_homeMemberState']),str(x['ae_entityName']).casefold(),str(x['id'])))
+          package={'source_total':num_found,'active_count':len(cleaned),'records':cleaned}
+          Path('esma_aifm_active.json').write_text(json.dumps(package,ensure_ascii=False,indent=2),encoding='utf-8')
+          with Path('esma_aifm_active.csv').open('w',encoding='utf-8',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(cleaned)
+          Path('esma_aifm_summary.txt').write_text(f'source_total={num_found}\nactive_count={len(cleaned)}\n',encoding='utf-8')
           PY
-      - name: Upload validated extract
+      - name: Download current FINMA fund-manager workbook
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --retry 4 --retry-delay 3 --location 'https://www.finma.ch/en/~/media/finma/dokumente/bewilligungstraeger/xlsx/flvervt.xlsx?hash=40A1EE24A0C5879846312FA53875BEC1&sc_lang=en' -o finma_fund_managers.xlsx
+          test "$(stat -c%s finma_fund_managers.xlsx)" -gt 100000
+      - name: Upload official extracts
         uses: actions/upload-artifact@v4
         with:
-          name: esma-aifm-active-20260730
+          name: official-capital-registers-20260730
           path: |
             esma_aifm_active.json
             esma_aifm_active.csv
             esma_aifm_summary.txt
+            finma_fund_managers.xlsx
           if-no-files-found: error
           retention-days: 1
-      - name: Commit run locator and extracted records
+      - name: Commit run locator
         shell: bash
         run: |
           set -euo pipefail
-          printf '%s\n' "$GITHUB_RUN_ID" > esma_aifm_run_id.txt
+          printf '%s\n' "$GITHUB_RUN_ID" > official_registers_run_id.txt
           git config user.name 'Agent Smith Funding Research'
           git config user.email 'actions@users.noreply.github.com'
-          git add esma_aifm_active.json esma_aifm_active.csv esma_aifm_active.b85 esma_aifm_summary.txt esma_aifm_run_id.txt
-          git commit -m 'Refresh validated active ESMA AIFM register extract'
+          git add official_registers_run_id.txt
+          git commit -m 'Record official-register extraction run'
           git push origin HEAD:funding-esma-extract-20260730
